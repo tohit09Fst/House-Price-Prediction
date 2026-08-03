@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import joblib
 import os
+import sklearn
 
 st.set_page_config(
     page_title="House Price Prediction",
@@ -10,13 +11,79 @@ st.set_page_config(
 )
 
 MODEL_PATH = "best_house_price_model.pkl"
+DATA_PATH = "train-00000-of-00001.parquet"
+TARGET_COL = "price_bdt"
+DROP_COLS = ["id"]
+CAT_COLS = ["city", "property_type", "condition", "furnishing"]
 
-@st.cache_resource
+
+def _build_pipeline():
+    from sklearn.preprocessing import OneHotEncoder
+    from sklearn.compose import ColumnTransformer
+    from sklearn.pipeline import Pipeline
+    from sklearn.ensemble import RandomForestRegressor
+
+    preprocessor = ColumnTransformer(
+        transformers=[("cat", OneHotEncoder(handle_unknown="ignore"), CAT_COLS)],
+        remainder="passthrough"
+    )
+    return Pipeline(steps=[
+        ("preprocessor", preprocessor),
+        ("model", RandomForestRegressor(
+            n_estimators=300, min_samples_leaf=2,
+            random_state=42, n_jobs=-1
+        ))
+    ])
+
+
+def _retrain_and_save():
+    from sklearn.model_selection import train_test_split
+
+    df = pd.read_parquet(DATA_PATH)
+    feature_cols = [c for c in df.columns if c not in [TARGET_COL] + DROP_COLS]
+    X = df[feature_cols]
+    y = df[TARGET_COL]
+
+    X_train, _, y_train, _ = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    pipeline = _build_pipeline()
+    pipeline.fit(X_train, y_train)
+    joblib.dump(pipeline, MODEL_PATH)
+    return pipeline
+
+
+@st.cache_resource(show_spinner="Loading / training model...")
 def load_model():
-    if not os.path.exists(MODEL_PATH):
-        st.error(f"Model file not found: {MODEL_PATH}")
-        return None
-    return joblib.load(MODEL_PATH)
+    try:
+        if not os.path.exists(MODEL_PATH):
+            if not os.path.exists(DATA_PATH):
+                st.error(
+                    f"Neither model file ({MODEL_PATH}) nor training data "
+                    f"({DATA_PATH}) found. Cannot proceed."
+                )
+                return None
+            st.warning("Model file missing — retraining from data (30-60s)...")
+            return _retrain_and_save()
+
+        return joblib.load(MODEL_PATH)
+
+    except (AttributeError, ModuleNotFoundError, ValueError, Exception) as e:
+        st.warning(
+            f"Couldn't load saved model (sklearn v{sklearn.__version__}): "
+            f"{type(e).__name__}. Retraining from data now...",
+            icon="🔧"
+        )
+        if not os.path.exists(DATA_PATH):
+            st.error(f"Training data ({DATA_PATH}) also missing. Cannot proceed.")
+            return None
+        try:
+            return _retrain_and_save()
+        except Exception as e2:
+            st.error(f"Retrain failed: {type(e2).__name__}: {e2}")
+            return None
+
 
 model = load_model()
 
